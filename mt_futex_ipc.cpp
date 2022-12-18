@@ -236,7 +236,7 @@ struct IPCChannel {
 	{
 		m_fucvar_recv->wait();
 
-		size_t answer_size = ((size_t *)m_shared_data_send)[0];
+		size_t answer_size = ((size_t *)m_shared_data_recv)[0];
 		if (answer_size > DATA_BUF_SIZE - sizeof(answer_size)) {
 			// malicious size
 			fmt::print("answer size too long\n");
@@ -296,6 +296,11 @@ struct SandboxChild {
 			// parent
 			m_child_pid = pid;
 			m_channel = std::make_unique<IPCChannel>(m_memfd, true);
+			std::string answer0 = m_channel->recvRaw();
+			if (answer0 != "\x01") {
+				fmt::print("[p] first answer must be callback end\n");
+				abort();
+			}
 		}
 	}
 
@@ -322,6 +327,8 @@ struct SandboxChild {
 	}
 };
 
+constexpr bool do_benchmark = true;
+
 void child_main(int memfd)
 {
 	auto channel = std::make_unique<IPCChannel>(memfd, false);
@@ -332,8 +339,22 @@ void child_main(int memfd)
 
 	std::string cb_data;
 
+	bool benchmarking = do_benchmark;
+
 	while (true) {
 		cb_data = channel->sendSync("\x01"); // callback end
+
+		if (benchmarking) {
+			//~ fmt::print("[c] got: {:x}\n", (int)cb_data[0]);
+			if (cb_data.size() != 5) {
+				fmt::print("size != 5 (it is {})\n", cb_data.size());
+				abort();
+			}
+			//~ fmt::print("[c] got: {:x}\n", ((int *)&cb_data[1])[0]);
+			if (((int *)&cb_data[1])[0] == 0)
+				benchmarking = false;
+			continue;
+		}
 
 		fmt::print("[c] got: {:x}\n", (int)cb_data[0]);
 
@@ -347,10 +368,37 @@ void child_main(int memfd)
 
 void parent_main()
 {
+	using namespace std::literals;
+
 	fmt::print("[p] starting...\n");
 
 	SandboxChild ipc_thing;
-	ipc_thing.m_channel->sendSync("\x42");
+
+	if (do_benchmark) {
+		auto timediff_seconds = [](struct timespec t1, struct timespec t0) -> double {
+				return t1.tv_sec - t0.tv_sec + 1.0e-9 * (t1.tv_nsec - t0.tv_nsec);
+			};
+
+		static constexpr int num_calls = 1000000;
+		struct timespec t0;
+		struct timespec t1;
+		clock_gettime(CLOCK_MONOTONIC, &t0);
+
+		for (int val = num_calls-1; val >= 0; --val) {
+			std::string msg("\0\0\0\0\0"sv);
+			((int *)&msg[1])[0] = val;
+			std::string answer = ipc_thing.m_channel->sendSync(msg);
+			(void)answer;
+		}
+
+		clock_gettime(CLOCK_MONOTONIC, &t1);
+		double dt = timediff_seconds(t1, t0);
+		fmt::print("[p] dt = {} s; per call: {} ns\n", dt, dt / num_calls * 1e9);
+
+	} else {
+		std::string answer = ipc_thing.m_channel->sendSync("\x42");
+		fmt::print("[p] got: {:x}\n", (int)answer[0]);
+	}
 
 	fmt::print("[p] ending...\n");
 }
