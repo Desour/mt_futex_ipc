@@ -2,6 +2,7 @@
 #include <cstring>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <linux/futex.h>
@@ -112,6 +113,7 @@ struct IPCChannel {
 	u8 *m_shared_data_send = nullptr;
 	FuCVar *m_fucvar_recv;
 	u8 *m_shared_data_recv = nullptr;
+	std::string m_recv_buffer;
 
 	IPCChannel(const IPCChannel &) = delete;
 	IPCChannel(IPCChannel &&) = delete;
@@ -192,6 +194,8 @@ struct IPCChannel {
 			m_shared_data_send = (u8 *)mmapped_data_c2p;
 			m_shared_data_recv = (u8 *)mmapped_data_p2c;
 		}
+
+		m_recv_buffer.resize(DATA_BUF_SIZE);
 	}
 
 	~IPCChannel()
@@ -211,7 +215,7 @@ struct IPCChannel {
 			perror_abort("munmap");
 	}
 
-	std::string sendSync(const std::string &msg)
+	std::string_view sendSync(const std::string &msg)
 	{
 		sendRaw(msg);
 		return recvRaw();
@@ -232,7 +236,7 @@ struct IPCChannel {
 		m_fucvar_send->post();
 	}
 
-	std::string recvRaw()
+	std::string_view recvRaw()
 	{
 		m_fucvar_recv->wait();
 
@@ -244,7 +248,10 @@ struct IPCChannel {
 		}
 		u8 *buf_recv_after_size = (u8 *)&((size_t *)m_shared_data_recv)[1];
 
-		return std::string((char *)buf_recv_after_size, answer_size);
+		std::memcpy(m_recv_buffer.data(), buf_recv_after_size, answer_size);
+
+		//~ return std::string((char *)buf_recv_after_size, answer_size);
+		return std::string_view(&m_recv_buffer[0], answer_size);
 	}
 };
 
@@ -296,7 +303,7 @@ struct SandboxChild {
 			// parent
 			m_child_pid = pid;
 			m_channel = std::make_unique<IPCChannel>(m_memfd, true);
-			std::string answer0 = m_channel->recvRaw();
+			std::string_view answer0 = m_channel->recvRaw();
 			if (answer0 != "\x01") {
 				fmt::print("[p] first answer must be callback end\n");
 				abort();
@@ -337,7 +344,7 @@ void child_main(int memfd)
 	close_all_fds_but({});
 	// TODO: sandbox
 
-	std::string cb_data;
+	std::string_view cb_data;
 
 	bool benchmarking = do_benchmark;
 
@@ -384,10 +391,10 @@ void parent_main()
 		struct timespec t1;
 		clock_gettime(CLOCK_MONOTONIC, &t0);
 
+		std::string msg("\0\0\0\0\0"sv);
 		for (int val = num_calls-1; val >= 0; --val) {
-			std::string msg("\0\0\0\0\0"sv);
 			((int *)&msg[1])[0] = val;
-			std::string answer = ipc_thing.m_channel->sendSync(msg);
+			std::string_view answer = ipc_thing.m_channel->sendSync(msg);
 			(void)answer;
 		}
 
@@ -396,7 +403,7 @@ void parent_main()
 		fmt::print("[p] dt = {} s; per call: {} ns\n", dt, dt / num_calls * 1e9);
 
 	} else {
-		std::string answer = ipc_thing.m_channel->sendSync("\x42");
+		std::string_view answer = ipc_thing.m_channel->sendSync("\x42");
 		fmt::print("[p] got: {:x}\n", (int)answer[0]);
 	}
 
